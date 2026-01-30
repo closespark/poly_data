@@ -223,10 +223,10 @@ def scrape(at_once=1000):
         if len(df) < at_once and sticky_timestamp is None:
             break
 
-    # Clear cursor file on successful completion
-    if os.path.isfile(CURSOR_FILE):
-        os.remove(CURSOR_FILE)
-    
+    # Save final cursor state (don't delete - we need it for next incremental run)
+    # The cursor now represents "we've scraped everything up to this timestamp"
+    save_cursor(last_timestamp, None, None)
+
     print(f"Finished scraping orderFilledEvents")
     print(f"Total new records: {total_records}")
     print(f"Output file: {output_file}")
@@ -236,9 +236,38 @@ def update_goldsky():
     print(f"\n{'='*50}")
     print(f"Starting to scrape orderFilledEvents")
     print(f"Runtime: {RUNTIME_TIMESTAMP}")
+    print(f"Current time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
     print(f"{'='*50}")
     try:
         scrape()
         print(f"Successfully completed orderFilledEvents")
+
+        # Print data range summary
+        output_file = get_data_path('goldsky/orderFilled.csv')
+        if os.path.isfile(output_file):
+            # Get first data timestamp
+            result = subprocess.run(['sed', '-n', '2p', output_file], capture_output=True, text=True)
+            if result.stdout:
+                try:
+                    first_ts = int(result.stdout.strip().split(',')[0])
+                    first_time = datetime.fromtimestamp(first_ts, tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
+                except:
+                    first_time = "unknown"
+            else:
+                first_time = "unknown"
+
+            # Get last data timestamp
+            result = subprocess.run(['tail', '-n', '1', output_file], capture_output=True, text=True)
+            if result.stdout:
+                try:
+                    last_ts = int(result.stdout.strip().split(',')[0])
+                    last_time = datetime.fromtimestamp(last_ts, tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
+                except:
+                    last_time = "unknown"
+            else:
+                last_time = "unknown"
+
+            print(f"\n📊 Data range: {first_time} → {last_time}")
+
     except Exception as e:
         print(f"Error scraping orderFilledEvents: {str(e)}")

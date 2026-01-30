@@ -11,6 +11,8 @@ from poly_utils.config import get_data_path
 
 import subprocess
 import csv
+import json
+from datetime import datetime, timezone
 
 import pandas as pd
 
@@ -96,6 +98,23 @@ def process_chunk(chunk_df, markets_lookup):
     return results
 
 
+def get_timestamp_from_line(filepath, line_num):
+    """Get the timestamp from a specific line in the goldsky file."""
+    try:
+        result = subprocess.run(
+            ['sed', '-n', f'{line_num}p', filepath],
+            capture_output=True, text=True
+        )
+        if result.stdout:
+            parts = result.stdout.strip().split(',')
+            if parts:
+                ts = int(parts[0])
+                return datetime.fromtimestamp(ts, tz=timezone.utc)
+    except:
+        pass
+    return None
+
+
 def process_live():
     processed_file = get_data_path('processed/trades.csv')
     goldsky_file = get_data_path("goldsky/orderFilled.csv")
@@ -103,20 +122,34 @@ def process_live():
 
     print("=" * 60)
     print("🔄 Processing Live Trades (Chunked)")
+    print(f"   Current time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
     print("=" * 60)
 
     # Get last processed position from checkpoint file (most reliable)
     start_line = 0
+    last_processed_time = None
 
     if os.path.exists(checkpoint_file):
         with open(checkpoint_file, 'r') as f:
-            checkpoint_data = f.read().strip()
-            if checkpoint_data:
-                try:
-                    start_line = int(checkpoint_data)
-                    print(f"✓ Found checkpoint: last processed goldsky line {start_line:,}")
-                except ValueError:
-                    print(f"⚠ Invalid checkpoint data, will verify from processed file")
+            try:
+                checkpoint_data = json.load(f)
+                start_line = checkpoint_data.get('line', 0)
+                last_ts = checkpoint_data.get('last_timestamp')
+                if last_ts:
+                    last_processed_time = datetime.fromtimestamp(last_ts, tz=timezone.utc)
+                print(f"✓ Found checkpoint: line {start_line:,}")
+                if last_processed_time:
+                    print(f"   Last processed: {last_processed_time.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+            except json.JSONDecodeError:
+                # Old format - just a line number
+                f.seek(0)
+                checkpoint_data = f.read().strip()
+                if checkpoint_data:
+                    try:
+                        start_line = int(checkpoint_data)
+                        print(f"✓ Found checkpoint (legacy): line {start_line:,}")
+                    except ValueError:
+                        print(f"⚠ Invalid checkpoint data, will verify from processed file")
 
     # Verify checkpoint against processed file
     if os.path.exists(processed_file) and start_line == 0:
@@ -232,9 +265,14 @@ def process_live():
                 rows_processed += len(chunk_buffer)
                 chunk_buffer = []
 
-                # Save checkpoint (current goldsky line number)
+                # Save checkpoint (current goldsky line number + timestamp)
+                last_ts = chunk_buffer[-1]['timestamp'] if chunk_buffer else None
+                checkpoint = {
+                    'line': i + 1,
+                    'last_timestamp': last_ts.timestamp() if last_ts else None
+                }
                 with open(checkpoint_file, 'w') as f:
-                    f.write(str(i + 1))
+                    json.dump(checkpoint, f)
 
                 # Progress update
                 pct = (i / total_lines) * 100 if total_lines > 0 else 0
@@ -248,9 +286,26 @@ def process_live():
             rows_written += len(processed)
         rows_processed += len(chunk_buffer)
 
-    # Save final checkpoint
+    # Save final checkpoint with timestamp
+    # Get last timestamp from the goldsky file
+    result = subprocess.run(['tail', '-n', '1', goldsky_file], capture_output=True, text=True)
+    last_ts = None
+    if result.stdout:
+        try:
+            last_ts = int(result.stdout.strip().split(',')[0])
+        except:
+            pass
+
+    checkpoint = {
+        'line': total_lines,
+        'last_timestamp': last_ts
+    }
     with open(checkpoint_file, 'w') as f:
-        f.write(str(total_lines))
+        json.dump(checkpoint, f)
+
+    if last_ts:
+        last_time = datetime.fromtimestamp(last_ts, tz=timezone.utc)
+        print(f"   Data up to: {last_time.strftime('%Y-%m-%d %H:%M:%S UTC')}")
 
     print(f"\n" + "=" * 60)
     print(f"✅ Processing complete!")
