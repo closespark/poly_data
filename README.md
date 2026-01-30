@@ -1,6 +1,6 @@
 # Polymarket Data
 
-A comprehensive data pipeline for fetching, processing, and analyzing Polymarket trading data. This system collects market information, order-filled events, and processes them into structured trade data.
+A comprehensive data pipeline for fetching, processing, and analyzing Polymarket trading data — plus a **real-time signal engine** for market making with wallet toxicity scoring.
 
 ## Quick Download
 
@@ -8,11 +8,18 @@ A comprehensive data pipeline for fetching, processing, and analyzing Polymarket
 
 ## Overview
 
-This pipeline performs three main operations:
+This system has two modes:
 
+### Offline Pipeline (Data Collection & Analysis)
 1. **Market Data Collection** - Fetches all Polymarket markets with metadata
 2. **Order Event Scraping** - Collects order-filled events from Goldsky subgraph
 3. **Trade Processing** - Transforms raw order events into structured trade data
+4. **Toxicity Analysis** - Builds wallet toxicity scores from markout analysis
+
+### Real-Time Signal Engine (Market Making)
+- **3-axis toxicity model**: outcome-based, identity-based, intent-based
+- **Book integrity monitoring**: WS state with REST reconciliation
+- **Full observability**: structured logging for threshold tuning
 
 ## Installation
 
@@ -62,19 +69,91 @@ This will sequentially run all three pipeline stages:
 ```
 poly_data/
 ├── update_all.py              # Main orchestrator script
+├── run_mm.py                  # Real-time market maker entry point
+├── run_offline_pipeline.sh    # Offline analysis pipeline
+├── TUNING.md                  # Signal engine tuning reference
+│
 ├── update_utils/              # Data collection modules
 │   ├── update_markets.py      # Fetch markets from Polymarket API
 │   ├── update_goldsky.py      # Scrape order events from Goldsky
 │   └── process_live.py        # Process orders into trades
+│
+├── analysis/                  # Offline analysis & toxicity
+│   ├── build_sweeps.py        # Group fills into atomic sweeps
+│   ├── build_wallet_toxicity.py  # Calculate markout-based toxicity
+│   ├── wallet_enrichment.py   # Alchemy wallet enrichment
+│   └── decision_analysis.py   # Post-hoc signal analysis toolkit
+│
+├── realtime/                  # Real-time signal engine
+│   ├── signal_engine.py       # Core 3-axis toxicity engine
+│   ├── book_store.py          # Order book management (WS + REST seed)
+│   ├── book_reconciler.py     # REST vs WS drift detection
+│   ├── alchemy_observer.py    # Live wallet enrichment
+│   ├── websocket_client.py    # Polymarket WS client
+│   ├── quote_lifetime.py      # Quote timing logic
+│   └── inventory.py           # Position tracking
+│
+├── enrichment/                # Wallet enrichment pipeline
+│   ├── alchemy_client.py      # Alchemy API wrapper
+│   ├── enrich_toxicity.py     # Batch enrichment
+│   └── pending_observer.py    # Mempool observation
+│
 ├── poly_utils/                # Utility functions
 │   └── utils.py               # Market loading and missing token handling
+│
 ├── markets.csv                # Main markets dataset
-├── missing_markets.csv        # Markets discovered from trades (auto-generated)
 ├── goldsky/                   # Order-filled events (auto-generated)
 │   └── orderFilled.csv
 └── processed/                 # Processed trade data (auto-generated)
     └── trades.csv
 ```
+
+## Real-Time Signal Engine
+
+The signal engine provides defensive signals for market making based on a 3-axis toxicity model.
+
+### The Three Axes
+
+| Axis | Source | What it measures |
+|------|--------|------------------|
+| **Outcome-based** | `wallet_toxicity.csv` | Historical markout performance (did this wallet's trades move against you?) |
+| **Identity-based** | Alchemy enrichment | Wallet age, DEX activity, contract interactions (bounded 0.8-1.5x multiplier) |
+| **Intent-based** | Live observation | Burst patterns, book state, mempool activity |
+
+### Quick Start
+
+```bash
+# 1. Build toxicity scores (after data collection)
+DATA_DIR=/var/data bash run_offline_pipeline.sh
+
+# 2. Run the signal engine
+ALCHEMY_API_KEY=your_key python run_mm.py
+```
+
+### Signal Types
+
+| Signal | Meaning | When triggered |
+|--------|---------|----------------|
+| `PULL` | Cancel quotes immediately | High toxicity taker detected |
+| `WIDEN` | Increase spread | Book integrity issues, moderate risk |
+| `HOLD` | Maintain current quotes | Normal conditions |
+
+### Key Design Principles
+
+1. **Alchemy EXTENDS, never INITIATES** — Identity enrichment modifies confidence, doesn't trigger actions alone
+2. **Sweep as atomic unit** — Fills grouped by `transactionHash` for accurate markout
+3. **Side-conditional toxicity** — BUY and SELL scored separately per wallet
+4. **Context decay** — Cross-regime lookups (different market type/expiry) are discounted
+
+### Observability
+
+Two log streams for surgical tuning:
+- `logs/decisions.jsonl` — Every signal decision with full context
+- `logs/health.jsonl` — System health metrics (30s intervals)
+
+See `TUNING.md` for threshold adjustment workflow.
+
+---
 
 ## Data Files
 
@@ -155,6 +234,24 @@ uv run python -c "from update_utils.process_live import process_live; process_li
 - Determines maker/taker directions (BUY/SELL)
 - Calculates price as USDC amount per outcome token
 - Converts amounts from raw units (divides by 10^6)
+
+### 4. Offline Analysis Pipeline
+
+After collecting trade data, run the analysis pipeline to build toxicity scores:
+
+```bash
+# Run full pipeline
+DATA_DIR=/var/data bash run_offline_pipeline.sh
+```
+
+This runs three stages:
+1. **build_sweeps.py** — Groups fills by `transactionHash` into atomic sweeps
+2. **build_wallet_toxicity.py** — Calculates markout at 1s/5s/30s horizons, produces wallet toxicity scores
+3. **wallet_enrichment.py** — Enriches with Alchemy data (wallet age, activity patterns)
+
+**Output**: `wallet_toxicity.csv` — compact file with per-wallet, per-side toxicity scores
+
+After toxicity is built, you can delete the large raw data files to reclaim disk space.
 
 ## Dependencies
 
@@ -254,6 +351,33 @@ USERS = {
 # Get all trades for a specific user
 trader_df = df.filter((pl.col("maker") == USERS['domah']))
 ```
+
+## Deployment (Render)
+
+### Environment Variables
+```
+DATA_DIR=/var/data
+ALCHEMY_API_KEY=your_key_here
+```
+
+### Persistent Disk
+Mount at `/var/data` with sufficient storage (150GB+ for full history, or filter to specific markets).
+
+### Workflow
+1. Deploy with data collection running (`update_all.py`)
+2. Wait for data fetch to complete
+3. Run offline pipeline from shell: `DATA_DIR=/var/data bash run_offline_pipeline.sh`
+4. Switch to signal engine: `python run_mm.py`
+
+### Disk Management
+After toxicity scores are built, delete raw data to reclaim space:
+```bash
+rm /var/data/goldsky/orderFilled.csv
+rm /var/data/processed/trades.csv
+# Keep: wallet_toxicity.csv, markets.csv, sweeps.csv
+```
+
+---
 
 ## License
 
