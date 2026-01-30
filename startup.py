@@ -7,6 +7,7 @@ Downloads and extracts the snapshot on first run, then runs the update pipeline.
 import os
 import subprocess
 import sys
+import json
 
 from poly_utils.config import DATA_DIR, get_data_path
 
@@ -24,16 +25,37 @@ def download_snapshot():
         return
 
     print(f"📥 No existing data found. Downloading snapshot...")
-    print(f"   Fetching from: {SNAPSHOT_URL}")
+    print(f"   Fetching metadata from: {SNAPSHOT_URL}")
 
     # Ensure data directory exists
     os.makedirs(DATA_DIR, exist_ok=True)
 
-    # Download and extract in one command
-    # The snapshot service redirects to S3, curl -sL follows redirects
-    cmd = f'curl -sL {SNAPSHOT_URL} | tar -xJ -C {DATA_DIR}'
+    # First, fetch the JSON to get the redirect URL
+    result = subprocess.run(
+        ['curl', '-s', SNAPSHOT_URL],
+        capture_output=True, text=True
+    )
 
+    if result.returncode != 0:
+        print(f"❌ Failed to fetch snapshot metadata: {result.stderr}")
+        sys.exit(1)
+
+    try:
+        metadata = json.loads(result.stdout)
+        redirect_url = metadata.get('redirect_url')
+        if not redirect_url:
+            print(f"❌ No redirect_url in response: {result.stdout}")
+            sys.exit(1)
+    except json.JSONDecodeError as e:
+        print(f"❌ Failed to parse snapshot metadata: {e}")
+        print(f"   Response: {result.stdout[:200]}")
+        sys.exit(1)
+
+    print(f"   Downloading from: {redirect_url}")
     print(f"   Extracting to: {DATA_DIR}")
+
+    # Download and extract
+    cmd = f'curl -sL "{redirect_url}" | tar -xJ -C {DATA_DIR}'
     result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
 
     if result.returncode != 0:
