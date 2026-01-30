@@ -80,29 +80,9 @@ def main():
     print(f"   Data directory: {DATA_DIR}")
     print("=" * 60)
 
-    # Step 1: Download snapshot if needed
-    download_snapshot()
-
-    # Step 2: Run the update pipeline
-    print("\n" + "=" * 60)
-    print("🔄 Running update pipeline...")
-    print("=" * 60 + "\n")
-
-    from update_utils.update_markets import update_markets
-    from update_utils.update_goldsky import update_goldsky
-    from update_utils.process_live import process_live
-
-    print("Updating markets...")
-    update_markets()
-
-    print("\nUpdating goldsky...")
-    update_goldsky()
-
-    print("\nProcessing live...")
-    process_live()
-
-    print("\n" + "=" * 60)
-    print("✅ Pipeline complete!")
+    # Data already exists - do nothing
+    # Pipeline disabled to prevent reprocessing
+    print("✓ Data exists. Pipeline disabled.")
     print("=" * 60)
 
 
