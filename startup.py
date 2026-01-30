@@ -75,6 +75,7 @@ def download_snapshot():
 
 
 def main():
+    import time
     print("=" * 60)
     print("🚀 Poly Data Pipeline - Startup")
     print(f"   Data directory: {DATA_DIR}")
@@ -83,7 +84,11 @@ def main():
     # Data already exists - do nothing
     # Pipeline disabled to prevent reprocessing
     print("✓ Data exists. Pipeline disabled.")
+    print("Sleeping forever. Use shell to run commands.")
     print("=" * 60)
+
+    while True:
+        time.sleep(3600)
 
 
 if __name__ == "__main__":
