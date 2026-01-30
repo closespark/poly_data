@@ -1,0 +1,15 @@
+services:
+  - type: worker
+    name: poly-data-pipeline
+    runtime: python
+    buildCommand: pip install -e .
+    startCommand: python startup.py
+    envVars:
+      - key: DATA_DIR
+        value: /var/data
+      - key: PYTHON_VERSION
+        value: "3.11"
+    disk:
+      name: poly-data
+      mountPath: /var/data
+      sizeGB: 10
