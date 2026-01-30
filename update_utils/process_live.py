@@ -151,48 +151,25 @@ def process_live():
                     except ValueError:
                         print(f"⚠ Invalid checkpoint data, will verify from processed file")
 
-    # Verify checkpoint against processed file
+    # Verify checkpoint against processed file - use row count, not grep (grep is too slow on large files)
     if os.path.exists(processed_file) and start_line == 0:
         print(f"✓ Found existing processed file: {processed_file}")
+
+        # Get last line info for logging
         result = subprocess.run(['tail', '-n', '1', processed_file], capture_output=True, text=True)
         last_line = result.stdout.strip()
         if last_line and ',' in last_line:
             splitted = last_line.split(',')
-            last_processed = {
-                'timestamp': splitted[0],
-                'transactionHash': splitted[-1],
-                'maker': splitted[2],
-                'taker': splitted[3]
-            }
-            print(f"📍 Last processed: {last_processed['timestamp']}")
-            print(f"   Last hash: {last_processed['transactionHash'][:16]}...")
+            print(f"📍 Last processed: {splitted[0]}")
+            print(f"   Last hash: {splitted[-1][:16]}...")
 
-            # Find position via grep
-            print(f"\n🔍 Finding resume position...")
-            search_pattern = f"{last_processed['transactionHash']}"
-            result = subprocess.run(
-                ['grep', '-n', search_pattern, goldsky_file],
-                capture_output=True, text=True
-            )
-            if result.stdout:
-                for line in result.stdout.strip().split('\n'):
-                    line_num, content = line.split(':', 1)
-                    if (last_processed['maker'] in content and
-                        last_processed['taker'] in content):
-                        start_line = int(line_num)
-                        print(f"✓ Found matching line: {start_line:,}")
-                        break
-
-            if start_line == 0:
-                # Fallback: count processed rows to estimate position
-                result = subprocess.run(['wc', '-l', processed_file], capture_output=True, text=True)
-                processed_count = int(result.stdout.strip().split()[0]) - 1  # minus header
-                if processed_count > 0:
-                    # Use processed count as minimum start line (conservative)
-                    # This prevents full reprocessing even if grep fails
-                    print(f"⚠ Could not find exact match, using processed row count as checkpoint")
-                    print(f"   Processed file has {processed_count:,} rows")
-                    start_line = processed_count
+        # Use row count as checkpoint (fast and reliable)
+        print(f"\n🔍 Counting processed rows...")
+        result = subprocess.run(['wc', '-l', processed_file], capture_output=True, text=True)
+        processed_count = int(result.stdout.strip().split()[0]) - 1  # minus header
+        if processed_count > 0:
+            print(f"✓ Processed file has {processed_count:,} rows")
+            start_line = processed_count
     elif not os.path.exists(processed_file):
         print("⚠ No existing processed file found - processing from beginning")
 
@@ -263,16 +240,17 @@ def process_live():
                     rows_written += len(processed)
 
                 rows_processed += len(chunk_buffer)
-                chunk_buffer = []
 
-                # Save checkpoint (current goldsky line number + timestamp)
+                # Save checkpoint BEFORE clearing buffer
                 last_ts = chunk_buffer[-1]['timestamp'] if chunk_buffer else None
                 checkpoint = {
                     'line': i + 1,
-                    'last_timestamp': last_ts.timestamp() if last_ts else None
+                    'last_timestamp': last_ts.timestamp() if hasattr(last_ts, 'timestamp') and last_ts else None
                 }
                 with open(checkpoint_file, 'w') as f:
                     json.dump(checkpoint, f)
+
+                chunk_buffer = []
 
                 # Progress update
                 pct = (i / total_lines) * 100 if total_lines > 0 else 0
