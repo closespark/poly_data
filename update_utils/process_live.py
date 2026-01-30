@@ -99,16 +99,27 @@ def process_chunk(chunk_df, markets_lookup):
 def process_live():
     processed_file = get_data_path('processed/trades.csv')
     goldsky_file = get_data_path("goldsky/orderFilled.csv")
+    checkpoint_file = get_data_path('processed/.goldsky_checkpoint')
 
     print("=" * 60)
     print("🔄 Processing Live Trades (Chunked)")
     print("=" * 60)
 
-    # Get last processed position
-    last_processed = None
+    # Get last processed position from checkpoint file (most reliable)
     start_line = 0
 
-    if os.path.exists(processed_file):
+    if os.path.exists(checkpoint_file):
+        with open(checkpoint_file, 'r') as f:
+            checkpoint_data = f.read().strip()
+            if checkpoint_data:
+                try:
+                    start_line = int(checkpoint_data)
+                    print(f"✓ Found checkpoint: last processed goldsky line {start_line:,}")
+                except ValueError:
+                    print(f"⚠ Invalid checkpoint data, will verify from processed file")
+
+    # Verify checkpoint against processed file
+    if os.path.exists(processed_file) and start_line == 0:
         print(f"✓ Found existing processed file: {processed_file}")
         result = subprocess.run(['tail', '-n', '1', processed_file], capture_output=True, text=True)
         last_line = result.stdout.strip()
@@ -120,9 +131,36 @@ def process_live():
                 'maker': splitted[2],
                 'taker': splitted[3]
             }
-            print(f"📍 Resuming from: {last_processed['timestamp']}")
+            print(f"📍 Last processed: {last_processed['timestamp']}")
             print(f"   Last hash: {last_processed['transactionHash'][:16]}...")
-    else:
+
+            # Find position via grep
+            print(f"\n🔍 Finding resume position...")
+            search_pattern = f"{last_processed['transactionHash']}"
+            result = subprocess.run(
+                ['grep', '-n', search_pattern, goldsky_file],
+                capture_output=True, text=True
+            )
+            if result.stdout:
+                for line in result.stdout.strip().split('\n'):
+                    line_num, content = line.split(':', 1)
+                    if (last_processed['maker'] in content and
+                        last_processed['taker'] in content):
+                        start_line = int(line_num)
+                        print(f"✓ Found matching line: {start_line:,}")
+                        break
+
+            if start_line == 0:
+                # Fallback: count processed rows to estimate position
+                result = subprocess.run(['wc', '-l', processed_file], capture_output=True, text=True)
+                processed_count = int(result.stdout.strip().split()[0]) - 1  # minus header
+                if processed_count > 0:
+                    # Use processed count as minimum start line (conservative)
+                    # This prevents full reprocessing even if grep fails
+                    print(f"⚠ Could not find exact match, using processed row count as checkpoint")
+                    print(f"   Processed file has {processed_count:,} rows")
+                    start_line = processed_count
+    elif not os.path.exists(processed_file):
         print("⚠ No existing processed file found - processing from beginning")
 
     # Load markets lookup (small, fits in memory)
@@ -136,25 +174,13 @@ def process_live():
     total_lines = int(result.stdout.strip().split()[0]) - 1  # minus header
     print(f"✓ Total rows: {total_lines:,}")
 
-    # Find starting position if resuming
-    if last_processed:
-        print(f"\n🔍 Finding resume position...")
-        # Use grep to find the line number of last processed
-        search_pattern = f"{last_processed['transactionHash']}"
-        result = subprocess.run(
-            ['grep', '-n', search_pattern, goldsky_file],
-            capture_output=True, text=True
-        )
-        if result.stdout:
-            # Find the exact match
-            for line in result.stdout.strip().split('\n'):
-                line_num, content = line.split(':', 1)
-                if (last_processed['maker'] in content and
-                    last_processed['taker'] in content and
-                    last_processed['timestamp'].replace(' ', '') in content.replace(' ', '')):
-                    start_line = int(line_num)
-                    break
-        print(f"✓ Resuming from line {start_line:,}")
+    # Check if already fully processed
+    if start_line >= total_lines:
+        print(f"\n✅ Already fully processed ({start_line:,} >= {total_lines:,} rows)")
+        print("   Nothing new to process.")
+        return
+
+    print(f"✓ Resuming from line {start_line:,} ({total_lines - start_line:,} new rows to process)")
 
     # Ensure output directory exists
     processed_dir = get_data_path('processed')
@@ -206,6 +232,10 @@ def process_live():
                 rows_processed += len(chunk_buffer)
                 chunk_buffer = []
 
+                # Save checkpoint (current goldsky line number)
+                with open(checkpoint_file, 'w') as f:
+                    f.write(str(i + 1))
+
                 # Progress update
                 pct = (i / total_lines) * 100 if total_lines > 0 else 0
                 print(f"   Processed {rows_processed:,} rows ({pct:.1f}%) - Written {rows_written:,} trades")
@@ -217,6 +247,10 @@ def process_live():
             write_results(processed_file, processed, write_header)
             rows_written += len(processed)
         rows_processed += len(chunk_buffer)
+
+    # Save final checkpoint
+    with open(checkpoint_file, 'w') as f:
+        f.write(str(total_lines))
 
     print(f"\n" + "=" * 60)
     print(f"✅ Processing complete!")
